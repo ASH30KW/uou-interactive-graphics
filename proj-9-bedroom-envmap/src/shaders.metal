@@ -215,11 +215,37 @@ half4 main_fragment(         VertexOut                          in           [[s
         }
 
         half ao_h = half(ao_factor);
-        tex_color = half4(0);
-        if (HasAmbient)  tex_color += mat.ambient_amount() * albedo * ao_h;
-        if (HasDiffuse)  tex_color += 0.6h * albedo * env_diffuse * ao_h;
-        if (HasSpecular) tex_color += 0.4h * env_spec * ao_h;
-        tex_color.a = albedo.a;
+        half metal = half(params.metallic);
+        half rough = half(params.roughness);
+
+        if (params.shader_mode == 1) {
+            // PBR IBL
+            half3 alb = albedo.rgb;
+            half3 F0 = mix(half3(0.04h), alb, metal);
+            half NdotV = max(dot(normal, normalize(camera_pos - frag_pos)), 0.0h);
+            half3 F = fresnel_schlick(NdotV, F0);
+            half3 kD = (1.0h - F) * (1.0h - metal);
+
+            // Roughness affects env specular (rougher = more blurred, approximated by mixing with diffuse)
+            half3 spec_env = mix(half3(env_spec.rgb), half3(env_diffuse.rgb), rough);
+
+            tex_color = half4(0);
+            if (HasAmbient)  tex_color.rgb += mat.ambient_amount() * alb * ao_h;
+            if (HasDiffuse)  tex_color.rgb += kD * alb * half3(env_diffuse.rgb) * ao_h;
+            if (HasSpecular) tex_color.rgb += F * spec_env * ao_h;
+            tex_color.a = albedo.a;
+
+            // Tone map + gamma
+            tex_color.rgb = tex_color.rgb / (tex_color.rgb + 1.0h);
+            tex_color.rgb = powr(tex_color.rgb, half3(1.0h / 2.2h));
+        } else {
+            // Blinn-Phong IBL
+            tex_color = half4(0);
+            if (HasAmbient)  tex_color += mat.ambient_amount() * albedo * ao_h;
+            if (HasDiffuse)  tex_color += 0.6h * albedo * env_diffuse * ao_h;
+            if (HasSpecular) tex_color += 0.4h * env_spec * ao_h;
+            tex_color.a = albedo.a;
+        }
     }
 
     // Environment reflection
