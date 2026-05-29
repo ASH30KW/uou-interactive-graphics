@@ -34,7 +34,9 @@ pub struct ShaderParams {
     reflectivity: f32,
     metallic: f32,
     roughness: f32,
-    shader_mode: i32,
+    shader_mode: i32,   // 0 = Blinn-Phong, 1 = PBR
+    point_light_on: i32, // 0 = off (env only), 1 = on
+    _pad: [i32; 3],     // padding to 16-byte alignment
 }
 
 struct ModelInstance {
@@ -213,6 +215,8 @@ impl RendererDelgate for Delegate {
                 metallic: 0.0,
                 roughness: 0.3,
                 shader_mode: 0,
+                point_light_on: 1,
+                _pad: [0; 3],
             },
             shading_mode,
             library,
@@ -342,6 +346,8 @@ impl RendererDelgate for Delegate {
                 123 => { self.shader_params.roughness = (self.shader_params.roughness - 0.05).max(0.05); self.needs_render = true; }
                 124 => { self.shader_params.roughness = (self.shader_params.roughness + 0.05).min(1.0); self.needs_render = true; }
                 46 => { self.shader_params.metallic = if self.shader_params.metallic < 0.5 { 1.0 } else { 0.0 }; self.needs_render = true; }
+                // L (37): toggle point light
+                37 => { self.shader_params.point_light_on = if self.shader_params.point_light_on == 0 { 1 } else { 0 }; self.needs_render = true; }
                 _ => {}
             }
         }

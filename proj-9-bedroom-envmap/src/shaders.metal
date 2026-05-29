@@ -95,7 +95,9 @@ struct ShaderParams {
     float reflectivity;
     float metallic;
     float roughness;
-    int   shader_mode;   // 0 = Blinn-Phong, 1 = PBR
+    int   shader_mode;      // 0 = Blinn-Phong, 1 = PBR
+    int   point_light_on;   // 0 = env light only, 1 = point light on
+    int   _pad[3];
 };
 
 // ========================================
@@ -121,43 +123,103 @@ half4 main_fragment(         VertexOut                          in           [[s
         return half4(normal.xy, normal.z * -1, 1);
     }
 
-    // Ray Traced Shadow
-    const float3 to_light = normalize(light_pos.xyz - pos.xyz);
+    // Determine shadow and lighting
     bool is_shadow = false;
-    if (dot(float3(normal), to_light) >= 0.0) {
-        raytracing::ray r(pos.xyz, to_light);
-        raytracing::intersector<> intersector;
-        intersector.set_triangle_cull_mode(raytracing::triangle_cull_mode::back);
-        intersector.assume_geometry_type(raytracing::geometry_type::triangle);
-        auto intersection = intersector.intersect(r, accel_struct);
-        is_shadow = intersection.type != raytracing::intersection_type::none;
-    }
-
-    // Choose shading model
     half4 tex_color;
-    if (params.shader_mode == 1) {
-        // PBR
-        TexturedMaterial mat(material, in.tx_coord, is_shadow);
-        tex_color = shade_pbr(frag_pos, half3(light_pos.xyz), camera_pos, normal,
-                              half(params.metallic), half(params.roughness), mat,
-                              HasAmbient, HasDiffuse, HasSpecular);
-        tex_color.rgb = tex_color.rgb / (tex_color.rgb + 1.0h);
-        tex_color.rgb = powr(tex_color.rgb, half3(1.0h / 2.2h));
+
+    if (params.point_light_on) {
+        // Point light mode: ray traced shadow
+        const float3 to_light = normalize(light_pos.xyz - pos.xyz);
+        if (dot(float3(normal), to_light) >= 0.0) {
+            raytracing::ray r(pos.xyz, to_light);
+            raytracing::intersector<> intersector;
+            intersector.set_triangle_cull_mode(raytracing::triangle_cull_mode::back);
+            intersector.assume_geometry_type(raytracing::geometry_type::triangle);
+            auto intersection = intersector.intersect(r, accel_struct);
+            is_shadow = intersection.type != raytracing::intersection_type::none;
+        }
+
+        if (params.shader_mode == 1) {
+            TexturedMaterial mat(material, in.tx_coord, is_shadow);
+            tex_color = shade_pbr(frag_pos, half3(light_pos.xyz), camera_pos, normal,
+                                  half(params.metallic), half(params.roughness), mat,
+                                  HasAmbient, HasDiffuse, HasSpecular);
+            tex_color.rgb = tex_color.rgb / (tex_color.rgb + 1.0h);
+            tex_color.rgb = powr(tex_color.rgb, half3(1.0h / 2.2h));
+        } else {
+            tex_color = shade_phong_blinn(
+                {
+                    .frag_pos     = frag_pos,
+                    .light_pos    = half3(light_pos.xyz),
+                    .camera_pos   = camera_pos,
+                    .normal       = normal,
+                    .has_ambient  = HasAmbient,
+                    .has_diffuse  = HasDiffuse,
+                    .has_specular = HasSpecular,
+                    .only_normals = false,
+                },
+                TexturedMaterial(material, in.tx_coord, is_shadow)
+            );
+        }
     } else {
-        // Blinn-Phong
-        tex_color = shade_phong_blinn(
-            {
-                .frag_pos     = frag_pos,
-                .light_pos    = half3(light_pos.xyz),
-                .camera_pos   = camera_pos,
-                .normal       = normal,
-                .has_ambient  = HasAmbient,
-                .has_diffuse  = HasDiffuse,
-                .has_specular = HasSpecular,
-                .only_normals = false,
-            },
-            TexturedMaterial(material, in.tx_coord, is_shadow)
-        );
+        // Environment light only: IBL with RT Ambient Occlusion
+        constexpr sampler env_s(mag_filter::linear, address::clamp_to_zero, min_filter::linear);
+        TexturedMaterial mat(material, in.tx_coord, false);
+        half4 albedo = mat.diffuse_color();
+
+        // RT Ambient Occlusion: trace rays in hemisphere around normal
+        // Use a fixed set of directions for deterministic, noise-free results
+        const float3 N = float3(normal);
+        // Build tangent frame from normal
+        float3 up = abs(N.y) < 0.99 ? float3(0,1,0) : float3(1,0,0);
+        float3 T = normalize(cross(up, N));
+        float3 B = cross(N, T);
+
+        // 8 sample directions in hemisphere (cosine-weighted)
+        const float ao_radius = 0.15;
+        constexpr int AO_SAMPLES = 8;
+        const float2 ao_dirs[AO_SAMPLES] = {
+            {0.0, 0.3}, {0.7, 0.7}, {-0.5, 0.6}, {0.9, -0.1},
+            {-0.8, 0.4}, {0.3, 0.9}, {-0.2, 0.8}, {0.6, -0.5}
+        };
+        float ao = 0.0;
+        raytracing::intersector<> ao_intersector;
+        ao_intersector.set_triangle_cull_mode(raytracing::triangle_cull_mode::back);
+        ao_intersector.assume_geometry_type(raytracing::geometry_type::triangle);
+        for (int i = 0; i < AO_SAMPLES; i++) {
+            // Cosine-weighted hemisphere direction
+            float x = ao_dirs[i].x;
+            float z = ao_dirs[i].y;
+            float y = sqrt(max(0.0, 1.0 - x*x - z*z));
+            float3 dir = normalize(T * x + N * y + B * z);
+            raytracing::ray r(pos.xyz + N * 0.001, dir, 0.0, ao_radius);
+            auto hit = ao_intersector.intersect(r, accel_struct);
+            if (hit.type != raytracing::intersection_type::none) {
+                ao += 1.0;
+            }
+        }
+        float ao_factor = 1.0 - (ao / float(AO_SAMPLES));
+
+        // Sample environment for diffuse (use normal direction)
+        half4 env_diffuse = half4(0);
+        if (!is_null_texture(env_texture)) {
+            env_diffuse = env_texture.sample(env_s, float3(normal));
+        }
+
+        // Sample environment for specular (use reflection direction)
+        const half3 camera_dir = normalize(frag_pos - camera_pos);
+        const half3 ref = reflect(camera_dir, normal);
+        half4 env_spec = half4(0);
+        if (!is_null_texture(env_texture)) {
+            env_spec = env_texture.sample(env_s, float3(ref));
+        }
+
+        half ao_h = half(ao_factor);
+        tex_color = half4(0);
+        if (HasAmbient)  tex_color += mat.ambient_amount() * albedo * ao_h;
+        if (HasDiffuse)  tex_color += 0.6h * albedo * env_diffuse * ao_h;
+        if (HasSpecular) tex_color += 0.4h * env_spec * ao_h;
+        tex_color.a = albedo.a;
     }
 
     // Environment reflection
