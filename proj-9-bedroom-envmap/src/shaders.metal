@@ -125,41 +125,73 @@ half4 main_fragment(         VertexOut                          in           [[s
 
     // Determine shadow and lighting
     bool is_shadow = false;
+    float shadow_factor = 0.0; // 0 = fully lit, 1 = fully shadowed
     half4 tex_color;
 
     if (params.point_light_on) {
-        // Point light mode: ray traced shadow
+        // Soft RT shadows: trace multiple rays to area around light
         const float3 to_light = normalize(light_pos.xyz - pos.xyz);
         if (dot(float3(normal), to_light) >= 0.0) {
-            raytracing::ray r(pos.xyz, to_light);
-            raytracing::intersector<> intersector;
-            intersector.set_triangle_cull_mode(raytracing::triangle_cull_mode::back);
-            intersector.assume_geometry_type(raytracing::geometry_type::triangle);
-            auto intersection = intersector.intersect(r, accel_struct);
-            is_shadow = intersection.type != raytracing::intersection_type::none;
+            // Build light tangent frame for area light sampling
+            float3 light_up = abs(to_light.y) < 0.99 ? float3(0,1,0) : float3(1,0,0);
+            float3 light_T = normalize(cross(light_up, to_light));
+            float3 light_B = cross(to_light, light_T);
+
+            const float light_radius = 0.15; // area light size
+            constexpr int SHADOW_SAMPLES = 8;
+            const float2 offsets[SHADOW_SAMPLES] = {
+                {0.0, 0.0},     // center
+                {1.0, 0.0}, {-1.0, 0.0}, {0.0, 1.0}, {0.0, -1.0},  // cross
+                {0.7, 0.7}, {-0.7, 0.7}, {0.7, -0.7}  // diagonals
+            };
+
+            raytracing::intersector<> shadow_intersector;
+            shadow_intersector.set_triangle_cull_mode(raytracing::triangle_cull_mode::back);
+            shadow_intersector.assume_geometry_type(raytracing::geometry_type::triangle);
+
+            int occluded = 0;
+            for (int i = 0; i < SHADOW_SAMPLES; i++) {
+                float3 light_sample = light_pos.xyz
+                    + light_T * (offsets[i].x * light_radius)
+                    + light_B * (offsets[i].y * light_radius);
+                float3 dir = normalize(light_sample - pos.xyz);
+                raytracing::ray r(pos.xyz + float3(normal) * 0.001, dir);
+                auto hit = shadow_intersector.intersect(r, accel_struct);
+                if (hit.type != raytracing::intersection_type::none) {
+                    occluded++;
+                }
+            }
+            // Partial shadow: 0 = fully lit, 1 = fully shadowed
+            float shadow_factor = float(occluded) / float(SHADOW_SAMPLES);
+            is_shadow = shadow_factor > 0.5; // for TexturedMaterial compatibility
+            // We'll use shadow_factor for smooth shadows below
         }
 
+        // Compute lit and shadowed versions, blend by shadow_factor for soft shadows
         if (params.shader_mode == 1) {
-            TexturedMaterial mat(material, in.tx_coord, is_shadow);
-            tex_color = shade_pbr(frag_pos, half3(light_pos.xyz), camera_pos, normal,
-                                  half(params.metallic), half(params.roughness), mat,
+            TexturedMaterial mat_lit(material, in.tx_coord, false);
+            TexturedMaterial mat_shd(material, in.tx_coord, true);
+            half4 lit = shade_pbr(frag_pos, half3(light_pos.xyz), camera_pos, normal,
+                                  half(params.metallic), half(params.roughness), mat_lit,
                                   HasAmbient, HasDiffuse, HasSpecular);
+            half4 shd = shade_pbr(frag_pos, half3(light_pos.xyz), camera_pos, normal,
+                                  half(params.metallic), half(params.roughness), mat_shd,
+                                  HasAmbient, HasDiffuse, HasSpecular);
+            tex_color = mix(lit, shd, half(shadow_factor));
             tex_color.rgb = tex_color.rgb / (tex_color.rgb + 1.0h);
             tex_color.rgb = powr(tex_color.rgb, half3(1.0h / 2.2h));
         } else {
-            tex_color = shade_phong_blinn(
-                {
-                    .frag_pos     = frag_pos,
-                    .light_pos    = half3(light_pos.xyz),
-                    .camera_pos   = camera_pos,
-                    .normal       = normal,
-                    .has_ambient  = HasAmbient,
-                    .has_diffuse  = HasDiffuse,
-                    .has_specular = HasSpecular,
-                    .only_normals = false,
-                },
-                TexturedMaterial(material, in.tx_coord, is_shadow)
-            );
+            half4 lit = shade_phong_blinn(
+                { .frag_pos = frag_pos, .light_pos = half3(light_pos.xyz), .camera_pos = camera_pos,
+                  .normal = normal, .has_ambient = HasAmbient, .has_diffuse = HasDiffuse,
+                  .has_specular = HasSpecular, .only_normals = false },
+                TexturedMaterial(material, in.tx_coord, false));
+            half4 shd = shade_phong_blinn(
+                { .frag_pos = frag_pos, .light_pos = half3(light_pos.xyz), .camera_pos = camera_pos,
+                  .normal = normal, .has_ambient = HasAmbient, .has_diffuse = HasDiffuse,
+                  .has_specular = HasSpecular, .only_normals = false },
+                TexturedMaterial(material, in.tx_coord, true));
+            tex_color = mix(lit, shd, half(shadow_factor));
         }
     } else {
         // Environment light only: IBL with RT Ambient Occlusion
@@ -176,11 +208,17 @@ half4 main_fragment(         VertexOut                          in           [[s
         float3 B = cross(N, T);
 
         // 8 sample directions in hemisphere (cosine-weighted)
-        const float ao_radius = 0.15;
-        constexpr int AO_SAMPLES = 8;
+        const float ao_radius = 0.25;
+        constexpr int AO_SAMPLES = 32;
         const float2 ao_dirs[AO_SAMPLES] = {
             {0.0, 0.3}, {0.7, 0.7}, {-0.5, 0.6}, {0.9, -0.1},
-            {-0.8, 0.4}, {0.3, 0.9}, {-0.2, 0.8}, {0.6, -0.5}
+            {-0.8, 0.4}, {0.3, 0.9}, {-0.2, 0.8}, {0.6, -0.5},
+            {0.4, 0.2}, {-0.3, -0.7}, {0.8, -0.4}, {-0.6, -0.3},
+            {0.1, -0.9}, {-0.9, -0.1}, {0.5, 0.5}, {-0.4, 0.9},
+            {0.2, 0.6}, {-0.7, 0.3}, {0.6, 0.1}, {-0.1, 0.95},
+            {0.85, 0.35}, {-0.45, -0.5}, {0.35, -0.8}, {-0.85, 0.15},
+            {0.15, -0.6}, {-0.6, 0.75}, {0.95, -0.3}, {-0.25, -0.85},
+            {0.55, 0.8}, {-0.95, -0.2}, {0.75, -0.65}, {-0.35, 0.45}
         };
         float ao = 0.0;
         raytracing::intersector<> ao_intersector;

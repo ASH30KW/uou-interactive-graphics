@@ -133,24 +133,14 @@ impl metal_app::pipeline::function::Function for bg_vertex {
     type Binds<'c> = NoBinds;
 }
 impl PipelineFunction<VertexFunctionType> for bg_vertex {}
-
 #[allow(non_camel_case_types)]
-pub struct bg_fragment_binds<'c> {
-    pub camera: Bind<'c, ProjectedSpace>,
-    pub env_texture: BindTexture<'c>,
-}
+pub struct bg_fragment_binds<'c> { pub camera: Bind<'c, ProjectedSpace>, pub env_texture: BindTexture<'c> }
 impl Binds for bg_fragment_binds<'_> {
     const SKIP: Self = Self { camera: Bind::Skip, env_texture: BindTexture::Skip };
     #[inline(always)]
-    fn bind<F: PipelineFunctionType>(self, encoder: &F::CommandEncoder) {
-        self.camera.bind::<F>(encoder, 0);
-        self.env_texture.bind::<F>(encoder, 0);
-    }
+    fn bind<F: PipelineFunctionType>(self, e: &F::CommandEncoder) { self.camera.bind::<F>(e, 0); self.env_texture.bind::<F>(e, 0); }
 }
 #[allow(non_camel_case_types)]
 pub struct bg_fragment;
-impl metal_app::pipeline::function::Function for bg_fragment {
-    const FUNCTION_NAME: &'static str = "bg_fragment";
-    type Binds<'c> = bg_fragment_binds<'c>;
-}
+impl metal_app::pipeline::function::Function for bg_fragment { const FUNCTION_NAME: &'static str = "bg_fragment"; type Binds<'c> = bg_fragment_binds<'c>; }
 impl PipelineFunction<FragmentFunctionType> for bg_fragment {}

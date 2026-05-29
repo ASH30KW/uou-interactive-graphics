@@ -264,8 +264,11 @@ impl RendererDelgate for Delegate {
                         ..Binds::SKIP
                     },
                 );
-                // Render light model, chair, plane
+                // Render models: light (only if on), chair, plane
                 for m in [&self.model_light, &self.model, &self.model_plane] {
+                    if m.name == "Light" && self.shader_params.point_light_on == 0 {
+                        continue;
+                    }
                     p.debug_group(m.name, || {
                         p.bind(
                             main_vertex_binds {
