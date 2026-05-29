@@ -8,6 +8,7 @@ members = [
     "metal-types",
     "png-add-alpha",
     "proj-*/",
+    "proj-9-bedroom-envmap",
     "x-rt/"
 ]
 

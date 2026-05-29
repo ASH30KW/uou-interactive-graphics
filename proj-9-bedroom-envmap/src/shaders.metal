@@ -1,0 +1,86 @@
+#include <metal_stdlib>
+#include "../../metal-shaders/src/shading.h"
+#include "../../metal-types/src/geometry-no-tx-coords.h"
+#include "../../metal-types/src/macros.h"
+#include "../../metal-types/src/model-space.h"
+#include "../../metal-types/src/projected-space.h"
+#include "../../metal-types/src/shading-mode.h"
+
+using namespace metal;
+
+struct VertexOut
+{
+    float4 position [[position]];
+    float3 normal;
+};
+
+[[vertex]]
+VertexOut main_vertex(         uint                 vertex_id [[vertex_id]],
+                      constant GeometryNoTxCoords & geometry  [[buffer(0)]],
+                      constant ProjectedSpace     & camera    [[buffer(1)]],
+                      constant ModelSpace         & model     [[buffer(2)]]) {
+    const uint idx      = geometry.indices[vertex_id];
+    const float4 pos    = model.m_model_to_projection * float4(geometry.positions[idx], 1.0);
+    const float3 normal = model.m_normal_to_world     * float3(geometry.normals[idx]);
+    return { .position = pos, .normal = normal };
+}
+
+[[fragment]]
+half4 main_fragment(         VertexOut           in          [[stage_in]],
+                    constant ProjectedSpace    & camera      [[buffer(0)]],
+                    constant float4            & light_pos   [[buffer(1)]],
+                    constant float3x3          & m_env  [[buffer(2)]],
+                    constant float             & darken      [[buffer(3)]],
+                             texturecube<half>   env_texture [[texture(0)]]) {
+    const float4 pos_w      = camera.m_screen_to_world * float4(in.position.xyz, 1);
+    const half3  pos        = half3(pos_w.xyz / pos_w.w);
+    const half3  camera_pos = half3(camera.position_world.xyz);
+    const half3  camera_dir = normalize(pos - camera_pos.xyz);
+    const half3  normal     = half3(normalize(in.normal));
+    const half3  ref        = half3x3(m_env) * reflect(camera_dir, normal);
+
+    constexpr sampler tx_sampler(mag_filter::linear, address::clamp_to_zero, min_filter::linear);
+    const half4 color       = env_texture.sample(tx_sampler, float3(ref));
+    return mix(
+        shade_phong_blinn(
+            {
+                .frag_pos     = pos,
+                .light_pos    = half3(light_pos.xyz),
+                .camera_pos   = camera_pos,
+                .normal       = normal,
+                .has_ambient  = HasAmbient,
+                .has_diffuse  = HasDiffuse,
+                .has_specular = HasSpecular,
+                .only_normals = OnlyNormals,
+            },
+            ConstantMaterial(color, color, color, 50, 0.5)
+        ),
+        half4(0.1),
+        darken
+    );
+};
+
+struct BGVertexOut {
+    float4 position [[position]];
+};
+
+[[vertex]]
+BGVertexOut bg_vertex(uint vertex_id [[vertex_id]]) {
+    constexpr const float2 plane_triange_strip_vertices[3] = {
+        {-1.h,  1.h}, // Top    Left
+        {-1.h, -3.h}, // Bottom Left
+        { 3.h,  1.h}, // Top    Right
+    };
+    const float2 position2d = plane_triange_strip_vertices[vertex_id];
+    return { .position = float4(position2d, 1, 1) };
+}
+
+[[fragment]]
+half4 bg_fragment(         BGVertexOut         in          [[stage_in]],
+                  constant ProjectedSpace    & camera      [[buffer(0)]],
+                           texturecube<half>   env_texture [[texture(0)]]) {
+    constexpr sampler tx_sampler(mag_filter::linear, address::clamp_to_zero, min_filter::linear);
+    const float4 pos   = camera.m_screen_to_world * float4(in.position.xy, 1, 1);
+    const half4  color = env_texture.sample(tx_sampler, pos.xyz);
+    return color;
+}

@@ -735,6 +735,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "proj-9-bedroom-envmap"
+version = "0.1.0"
+dependencies = [
+ "asset-compiler",
+ "build-hash",
+ "metal-app",
+ "metal-build",
+ "png",
+]
+
+[[package]]
 name = "proj-final"
 version = "0.1.0"
 dependencies = [
