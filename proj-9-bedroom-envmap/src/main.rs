@@ -3,9 +3,10 @@
 mod shader_bindings;
 
 use metal_app::{
-    components::{Camera, DepthTexture, ShadingModeSelector, ShadowMapTexture},
+    components::{Camera, DepthTexture, ShadingModeSelector},
     metal::*,
     metal_types::*,
+    model_acceleration_structure::ModelAccelerationStructure,
     pipeline::*,
     *,
 };
@@ -27,6 +28,15 @@ const USAGE_RENDER_STAGES: MTLRenderStages = unsafe {
     )
 };
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ShaderParams {
+    reflectivity: f32,
+    metallic: f32,
+    roughness: f32,
+    shader_mode: i32,
+}
+
 struct ModelInstance {
     m_model_to_world: f32x4x4,
     model: Model<Geometry, HasMaterial<Material>>,
@@ -40,11 +50,10 @@ impl ModelInstance {
         name: &'static str,
         device: &Device,
         model_file: PathBuf,
-        init_m_model_to_world: impl FnOnce(&MaxBounds) -> f32x4x4,
+        init_m: impl FnOnce(&MaxBounds) -> f32x4x4,
     ) -> Self {
         let model = Model::from_file(
-            model_file,
-            device,
+            model_file, device,
             |arg: &mut Geometry, geo| {
                 arg.indices = geo.indices_buffer;
                 arg.positions = geo.positions_buffer;
@@ -60,23 +69,21 @@ impl ModelInstance {
             }),
         );
         Self {
-            m_model_to_world: init_m_model_to_world(&model.geometry_max_bounds),
-            model,
-            model_space: ModelSpace::default(),
-            name,
+            m_model_to_world: init_m(&model.geometry_max_bounds),
+            model, model_space: ModelSpace::default(), name,
         }
     }
 
-    fn on_camera_update(&mut self, camera_m_world_to_projection: f32x4x4) {
+    fn on_camera_update(&mut self, m_world_to_proj: f32x4x4) {
         self.model_space = ModelSpace {
-            m_model_to_projection: (camera_m_world_to_projection * self.m_model_to_world),
+            m_model_to_projection: m_world_to_proj * self.m_model_to_world,
             m_normal_to_world: self.m_model_to_world.into(),
         };
     }
 }
 
 struct Delegate {
-    bg_render_pipeline: RenderPipeline<1, bg_vertex, bg_fragment, (Depth, NoStencil)>,
+    bg_pipeline: RenderPipeline<1, bg_vertex, bg_fragment, (Depth, NoStencil)>,
     camera: Camera,
     command_queue: CommandQueue,
     cubemap_texture: Texture,
@@ -85,29 +92,23 @@ struct Delegate {
     depth_texture: DepthTexture,
     device: Device,
     library: Library,
-    light_space: ProjectedSpace,
+    light_pipeline: RenderPipeline<1, light_vertex, light_fragment, (Depth, NoStencil)>,
     light: Camera,
     model: ModelInstance,
+    model_as: ModelAccelerationStructure,
+    model_light: ModelInstance,
     model_plane: ModelInstance,
     model_pipeline: RenderPipeline<1, main_vertex, main_fragment, (Depth, NoStencil)>,
-    model_shadow_space: ModelSpace,
     needs_render: bool,
-    needs_render_shadow_map: bool,
-    reflectivity: f32,
+    shader_params: ShaderParams,
     shading_mode: ShadingModeSelector,
-    shadow_map_pipeline: RenderPipeline<0, main_vertex, NoFragmentFunction, (Depth, NoStencil)>,
-    shadow_map_texture: ShadowMapTexture,
 }
 
 fn create_pipeline(
-    device: &Device,
-    library: &Library,
-    shading_mode: ShadingModeSelector,
+    device: &Device, library: &Library, shading_mode: ShadingModeSelector,
 ) -> RenderPipeline<1, main_vertex, main_fragment, (Depth, NoStencil)> {
     RenderPipeline::new(
-        "Model",
-        device,
-        library,
+        "Model", device, library,
         [(DEFAULT_COLOR_FORMAT, BlendMode::NoBlend)],
         main_vertex,
         main_fragment {
@@ -132,30 +133,44 @@ impl RendererDelgate for Delegate {
         let library = device
             .new_library_with_data(LIBRARY_BYTES)
             .expect("Failed to import shader metal lib.");
+        let command_queue = device.new_command_queue();
 
         let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("common-assets");
+            .join("..").join("common-assets");
+        let chair_path = assets_dir.join("chair").join("chair.obj");
 
         let mut plane_y = 0_f32;
+        let mut m_model_to_world = f32x4x4::identity();
         let shading_mode = ShadingModeSelector::DEFAULT;
+
+        let model = ModelInstance::new::<DEFAULT_AMBIENT_AMOUNT>(
+            "Chair", &device, chair_path.clone(),
+            |&MaxBounds { center, size }| {
+                let &[cx, cy, cz, _] = center.neg().as_array();
+                let scale = 1. / size.reduce_max();
+                plane_y = 0.5 * scale * size[2];
+                m_model_to_world = (f32x4x4::scale(scale, scale, scale, 1.)
+                    * (f32x4x4::y_rotate(PI) * f32x4x4::x_rotate(PI / 2.)))
+                    * f32x4x4::translate(cx, cy, cz);
+                m_model_to_world
+            },
+        );
+
+        let model_as = ModelAccelerationStructure::from_file(
+            &chair_path, &device, &command_queue,
+            |_, _| m_model_to_world,
+        );
+
         Self {
-            bg_render_pipeline: RenderPipeline::new(
-                "BG",
-                &device,
-                &library,
+            bg_pipeline: RenderPipeline::new(
+                "BG", &device, &library,
                 [(DEFAULT_COLOR_FORMAT, BlendMode::NoBlend)],
-                bg_vertex,
-                bg_fragment,
+                bg_vertex, bg_fragment,
                 (Depth(DEFAULT_DEPTH_FORMAT), NoStencil),
             ),
             camera: Camera::new_with_default_distance(
-                INITIAL_CAMERA_ROTATION,
-                ModifierKeys::empty(),
-                false,
-                0.,
+                INITIAL_CAMERA_ROTATION, ModifierKeys::empty(), false, 0.,
             ),
-            command_queue: device.new_command_queue(),
             cubemap_texture,
             depth_state: {
                 let desc = DepthStencilDescriptor::new();
@@ -171,104 +186,52 @@ impl RendererDelgate for Delegate {
             },
             depth_texture: DepthTexture::new("Depth", DEFAULT_DEPTH_FORMAT),
             light: Camera::new_with_default_distance(
-                INITIAL_LIGHT_ROTATION,
-                ModifierKeys::CONTROL,
-                true,
-                1.,
+                INITIAL_LIGHT_ROTATION, ModifierKeys::CONTROL, true, 1.,
             ),
-            light_space: Default::default(),
-            model: ModelInstance::new::<DEFAULT_AMBIENT_AMOUNT>(
-                "Chair",
-                &device,
-                assets_dir.join("chair").join("chair.obj"),
-                #[inline]
-                |&MaxBounds { center, size }| {
-                    let &[cx, cy, cz, _] = center.neg().as_array();
-                    let scale = 1. / size.reduce_max();
-                    plane_y = 0.5 * scale * size[2];
-                    (f32x4x4::scale(scale, scale, scale, 1.)
-                        * (f32x4x4::y_rotate(PI) * f32x4x4::x_rotate(PI / 2.)))
-                        * f32x4x4::translate(cx, cy, cz)
-                },
+            light_pipeline: RenderPipeline::new(
+                "Light", &device, &library,
+                [(DEFAULT_COLOR_FORMAT, BlendMode::NoBlend)],
+                light_vertex, light_fragment,
+                (Depth(DEFAULT_DEPTH_FORMAT), NoStencil),
             ),
-            model_shadow_space: ModelSpace::default(),
+            model,
+            model_as,
+            model_light: ModelInstance::new::<80>(
+                "Light", &device,
+                assets_dir.join("light").join("light.obj"),
+                |_| f32x4x4::identity(),
+            ),
             model_plane: ModelInstance::new::<DEFAULT_AMBIENT_AMOUNT>(
-                "Plane",
-                &device,
+                "Plane", &device,
                 assets_dir.join("plane").join("plane.obj"),
                 |_| f32x4x4::translate(0., -plane_y, 0.),
             ),
             model_pipeline: create_pipeline(&device, &library, shading_mode),
-            shadow_map_pipeline: RenderPipeline::new(
-                "Shadow Map",
-                &device,
-                &library,
-                [],
-                main_vertex,
-                NoFragmentFunction,
-                (Depth(DEFAULT_DEPTH_FORMAT), NoStencil),
-            ),
+            needs_render: true,
+            shader_params: ShaderParams {
+                reflectivity: 0.15,
+                metallic: 0.0,
+                roughness: 0.3,
+                shader_mode: 0,
+            },
             shading_mode,
-            shadow_map_texture: ShadowMapTexture::new("Shadow Map", DEFAULT_DEPTH_FORMAT),
-            needs_render: false,
-            needs_render_shadow_map: true,
-            reflectivity: 0.15,
             library,
             device,
+            command_queue,
         }
     }
 
     #[inline]
     fn render(&mut self, render_target: &TextureRef) -> &CommandBufferRef {
-        let needs_render_shadow_map = std::mem::replace(&mut self.needs_render_shadow_map, false);
         self.needs_render = false;
-
         let command_buffer = self
             .command_queue
             .new_command_buffer_with_unretained_references();
         command_buffer.set_label("Renderer Command Buffer");
-        let shadow_tx = self.shadow_map_texture.texture();
         let depth_tx = self.depth_texture.texture();
 
-        // Pass 1: Shadow map from light's perspective
-        if needs_render_shadow_map {
-            self.shadow_map_pipeline.new_pass(
-                "Shadow Map",
-                command_buffer,
-                [],
-                (shadow_tx, 1., MTLLoadAction::Clear, MTLStoreAction::Store),
-                NoStencil,
-                &self.depth_state,
-                MTLCullMode::None,
-                &[&HeapUsage(&self.model.model.heap, USAGE_RENDER_STAGES)],
-                |p| {
-                    p.set_depth_bias(1.0, 15.0, 0.0);
-                    p.bind(
-                        main_vertex_binds {
-                            model: Bind::Value(&self.model_shadow_space),
-                            geometry: Bind::Skip,
-                        },
-                        NoBinds,
-                    );
-                    for draw in self.model.model.draws() {
-                        p.draw_primitives_with_binds(
-                            main_vertex_binds {
-                                model: Bind::Skip,
-                                geometry: Bind::buffer_with_rolling_offset(draw.geometry),
-                            },
-                            NoBinds,
-                            MTLPrimitiveType::Triangle,
-                            0,
-                            draw.vertex_count,
-                        )
-                    }
-                },
-            );
-        }
-
-        // Pass 2: Render model + plane with shadows and env reflection
         self.model_pipeline.new_pass(
-            "Model, Plane",
+            "Scene",
             command_buffer,
             [(
                 render_target,
@@ -283,25 +246,22 @@ impl RendererDelgate for Delegate {
             &[
                 &HeapUsage(&self.model.model.heap, USAGE_RENDER_STAGES),
                 &HeapUsage(&self.model_plane.model.heap, USAGE_RENDER_STAGES),
-                &TextureUsage(
-                    shadow_tx,
-                    MTLResourceUsage::Sample,
-                    MTLRenderStages::Fragment,
-                ),
+                &HeapUsage(&self.model_light.model.heap, USAGE_RENDER_STAGES),
             ],
             |p| {
                 p.bind(
                     main_vertex_binds::SKIP,
                     main_fragment_binds {
                         camera: Bind::Value(&self.camera.projected_space),
-                        light: Bind::Value(&self.light_space),
-                        reflectivity: Bind::Value(&self.reflectivity),
-                        shadow_tx: BindTexture(shadow_tx),
+                        light_pos: Bind::Value(&self.light.projected_space.position_world),
+                        params: Bind::Value(&self.shader_params),
+                        accel_struct: self.model_as.bind(),
                         env_texture: BindTexture(&self.cubemap_texture),
                         ..Binds::SKIP
                     },
                 );
-                for m in [&self.model, &self.model_plane] {
+                // Render light model, chair, plane
+                for m in [&self.model_light, &self.model, &self.model_plane] {
                     p.debug_group(m.name, || {
                         p.bind(
                             main_vertex_binds {
@@ -330,8 +290,8 @@ impl RendererDelgate for Delegate {
                         }
                     });
                 }
-                // BG skybox behind everything
-                p.into_subpass("BG", &self.bg_render_pipeline,
+                // BG skybox
+                p.into_subpass("BG", &self.bg_pipeline,
                     Some(&self.depth_read_only),
                     Some(MTLCullMode::None),
                     |p| {
@@ -341,9 +301,7 @@ impl RendererDelgate for Delegate {
                             camera: Bind::Value(&self.camera.projected_space),
                             env_texture: BindTexture(&self.cubemap_texture),
                         },
-                        MTLPrimitiveType::Triangle,
-                        0,
-                        3,
+                        MTLPrimitiveType::Triangle, 0, 3,
                     )
                 });
             },
@@ -354,70 +312,48 @@ impl RendererDelgate for Delegate {
     #[inline]
     fn on_event(&mut self, event: UserEvent) {
         if self.camera.on_event(event) {
-            for m in [&mut self.model, &mut self.model_plane] {
+            for m in [&mut self.model, &mut self.model_plane, &mut self.model_light] {
                 m.on_camera_update(self.camera.projected_space.m_world_to_projection);
             }
             self.needs_render = true;
         }
         if self.light.on_event(event) {
-            self.model_shadow_space = ModelSpace {
-                m_model_to_projection: (self.light.projected_space.m_world_to_projection
-                    * self.model.m_model_to_world),
-                m_normal_to_world: self.model.m_model_to_world.into(),
-            };
-            self.light_space = ProjectedSpace {
-                m_world_to_projection: {
-                    const PROJECTION_TO_TEXTURE_COORDINATE_SPACE: f32x4x4 = f32x4x4::new(
-                        [0.5, 0.0, 0.0, 0.5],
-                        [0.0, -0.5, 0.0, 0.5],
-                        [0.0, 0.0, 1.0, 0.0],
-                        [0.0, 0.0, 0.0, 1.0],
-                    );
-                    PROJECTION_TO_TEXTURE_COORDINATE_SPACE
-                } * self.light.projected_space.m_world_to_projection,
-                m_screen_to_world: self.light.projected_space.m_screen_to_world,
-                position_world: self.light.projected_space.position_world.into(),
-            };
+            // Update light model position
+            self.model_light.m_model_to_world = self.light.get_camera_to_world_transform()
+                * f32x4x4::y_rotate(PI)
+                * f32x4x4::scale(0.1, 0.1, 0.1, 1.0);
+            self.model_light
+                .on_camera_update(self.camera.projected_space.m_world_to_projection);
             self.needs_render = true;
-            self.needs_render_shadow_map = true;
         }
         if self.shading_mode.on_event(event) {
-            self.model_pipeline = create_pipeline(&self.device, &self.library, self.shading_mode);
+            self.model_pipeline =
+                create_pipeline(&self.device, &self.library, self.shading_mode);
             self.needs_render = true;
         }
         if self.depth_texture.on_event(event, &self.device) {
             self.needs_render = true;
         }
-        if self.shadow_map_texture.on_event(event, &self.device) {
-            self.needs_render_shadow_map = true;
-        }
-        // Up/Down arrows: adjust reflectivity
         if let UserEvent::KeyDown { key_code, .. } = event {
             match key_code {
-                126 => {
-                    self.reflectivity = (self.reflectivity + 0.05).min(1.0);
-                    self.needs_render = true;
-                }
-                125 => {
-                    self.reflectivity = (self.reflectivity - 0.05).max(0.0);
-                    self.needs_render = true;
-                }
+                126 => { self.shader_params.reflectivity = (self.shader_params.reflectivity + 0.05).min(1.0); self.needs_render = true; }
+                125 => { self.shader_params.reflectivity = (self.shader_params.reflectivity - 0.05).max(0.0); self.needs_render = true; }
+                35 => { self.shader_params.shader_mode = if self.shader_params.shader_mode == 0 { 1 } else { 0 }; self.needs_render = true; }
+                123 => { self.shader_params.roughness = (self.shader_params.roughness - 0.05).max(0.05); self.needs_render = true; }
+                124 => { self.shader_params.roughness = (self.shader_params.roughness + 0.05).min(1.0); self.needs_render = true; }
+                46 => { self.shader_params.metallic = if self.shader_params.metallic < 0.5 { 1.0 } else { 0.0 }; self.needs_render = true; }
                 _ => {}
             }
         }
     }
 
     #[inline(always)]
-    fn needs_render(&self) -> bool {
-        self.needs_render
-    }
+    fn needs_render(&self) -> bool { self.needs_render }
 
     #[inline]
-    fn device(&self) -> &Device {
-        &self.device
-    }
+    fn device(&self) -> &Device { &self.device }
 }
 
 fn main() {
-    launch_application::<Delegate>("Project 9 - Bedroom Env Map (Up/Down: reflectivity, Ctrl+Drag: light)");
+    launch_application::<Delegate>("Project 9 - Bedroom (P:shader M:metal Arrows:rough/reflect Ctrl+Drag:light)");
 }

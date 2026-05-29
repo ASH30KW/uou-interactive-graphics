@@ -8,6 +8,7 @@
 ***************************************************************************************************/
 #[allow(unused_imports)]
 use metal_app::{metal::*, metal_types::*, pipeline::*};
+use crate::ShaderParams;
 
 /****************
  Shader functions
@@ -42,30 +43,30 @@ impl PipelineFunction<VertexFunctionType> for main_vertex {}
 #[allow(non_camel_case_types)]
 pub struct main_fragment_binds<'c> {
     pub camera: Bind<'c, ProjectedSpace>,
-    pub light: Bind<'c, ProjectedSpace>,
+    pub light_pos: Bind<'c, float4>,
     pub material: Bind<'c, Material>,
-    pub reflectivity: Bind<'c, float>,
-    pub shadow_tx: BindTexture<'c>,
+    pub params: Bind<'c, ShaderParams>,
+    pub accel_struct: BindAccelerationStructure<'c>,
     pub env_texture: BindTexture<'c>,
 }
 impl Binds for main_fragment_binds<'_> {
     const SKIP: Self = Self {
         camera: Bind::Skip,
-        light: Bind::Skip,
+        light_pos: Bind::Skip,
         material: Bind::Skip,
-        reflectivity: Bind::Skip,
-        shadow_tx: BindTexture::Skip,
+        params: Bind::Skip,
+        accel_struct: BindAccelerationStructure::Skip,
         env_texture: BindTexture::Skip,
     };
 
     #[inline(always)]
     fn bind<F: PipelineFunctionType>(self, encoder: &F::CommandEncoder) {
         self.camera.bind::<F>(encoder, 0);
-        self.light.bind::<F>(encoder, 1);
+        self.light_pos.bind::<F>(encoder, 1);
         self.material.bind::<F>(encoder, 2);
-        self.reflectivity.bind::<F>(encoder, 3);
-        self.shadow_tx.bind::<F>(encoder, 0);
-        self.env_texture.bind::<F>(encoder, 1);
+        self.params.bind::<F>(encoder, 3);
+        self.accel_struct.bind::<F>(encoder, 4);
+        self.env_texture.bind::<F>(encoder, 0);
     }
 }
 
@@ -92,6 +93,40 @@ impl metal_app::pipeline::function::Function for main_fragment {
 impl PipelineFunction<FragmentFunctionType> for main_fragment {}
 
 #[allow(non_camel_case_types)]
+pub struct light_vertex_binds<'c> {
+    pub camera: Bind<'c, ProjectedSpace>,
+    pub light_pos: Bind<'c, float4>,
+}
+impl Binds for light_vertex_binds<'_> {
+    const SKIP: Self = Self {
+        camera: Bind::Skip,
+        light_pos: Bind::Skip,
+    };
+
+    #[inline(always)]
+    fn bind<F: PipelineFunctionType>(self, encoder: &F::CommandEncoder) {
+        self.camera.bind::<F>(encoder, 0);
+        self.light_pos.bind::<F>(encoder, 1);
+    }
+}
+
+#[allow(non_camel_case_types)]
+pub struct light_vertex;
+impl metal_app::pipeline::function::Function for light_vertex {
+    const FUNCTION_NAME: &'static str = "light_vertex";
+    type Binds<'c> = light_vertex_binds<'c>;
+}
+impl PipelineFunction<VertexFunctionType> for light_vertex {}
+
+#[allow(non_camel_case_types)]
+pub struct light_fragment;
+impl metal_app::pipeline::function::Function for light_fragment {
+    const FUNCTION_NAME: &'static str = "light_fragment";
+    type Binds<'c> = NoBinds;
+}
+impl PipelineFunction<FragmentFunctionType> for light_fragment {}
+
+#[allow(non_camel_case_types)]
 pub struct bg_vertex;
 impl metal_app::pipeline::function::Function for bg_vertex {
     const FUNCTION_NAME: &'static str = "bg_vertex";
@@ -105,18 +140,13 @@ pub struct bg_fragment_binds<'c> {
     pub env_texture: BindTexture<'c>,
 }
 impl Binds for bg_fragment_binds<'_> {
-    const SKIP: Self = Self {
-        camera: Bind::Skip,
-        env_texture: BindTexture::Skip,
-    };
-
+    const SKIP: Self = Self { camera: Bind::Skip, env_texture: BindTexture::Skip };
     #[inline(always)]
     fn bind<F: PipelineFunctionType>(self, encoder: &F::CommandEncoder) {
         self.camera.bind::<F>(encoder, 0);
         self.env_texture.bind::<F>(encoder, 0);
     }
 }
-
 #[allow(non_camel_case_types)]
 pub struct bg_fragment;
 impl metal_app::pipeline::function::Function for bg_fragment {
