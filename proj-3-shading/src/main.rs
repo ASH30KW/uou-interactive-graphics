@@ -58,13 +58,13 @@ fn create_model_pipeline(
 
 impl RendererDelgate for Delegate {
     fn new(device: Device) -> Self {
-        let teapot_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let model_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("common-assets")
-            .join("teapot")
-            .join("teapot.obj");
+            .join("chair")
+            .join("chair.obj");
         let model = Model::from_file(
-            teapot_file,
+            model_file,
             &device,
             |arg: &mut GeometryNoTxCoords,
              GeometryToEncode {

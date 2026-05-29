@@ -27,8 +27,8 @@ impl RendererDelgate for Delegate {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("..")
                 .join("common-assets")
-                .join("teapot")
-                .join("teapot.obj"),
+                .join("chair")
+                .join("chair.obj"),
             &device,
             |arg: &mut GeometryPositions, geo| {
                 arg.indices = geo.indices_buffer;

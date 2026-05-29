@@ -1,0 +1,33 @@
+newmtl mat_Shader1
+	Ns 58.00000000
+	Ni 1.50000000
+	d 1.00000000
+	Tr 0.00000000
+	Tf 1.00000000 1.00000000 1.00000000
+	illum 2
+	Ka 0.04313726 0.04313726 0.04313726
+	Kd 0.21568629 0.21568629 0.21568629
+	Ks 0.50000000 0.50000000 0.50000000
+	Ke 0.00000000 0.00000000 0.00000000
+	map_Ka mat_Shader1_diffuse.png
+	map_Kd mat_Shader1_diffuse.png
+	map_Ks mat_Shader1_specular.png
+	map_bump mat_Shader1_bump.png
+	bump mat_Shader1_bump.png
+
+newmtl mat_Shader2
+	Ns 58.00000000
+	Ni 1.50000000
+	d 1.00000000
+	Tr 0.00000000
+	Tf 1.00000000 1.00000000 1.00000000
+	illum 2
+	Ka 0.04313726 0.04313726 0.04313726
+	Kd 0.21568629 0.21568629 0.21568629
+	Ks 0.50000000 0.50000000 0.50000000
+	Ke 0.00000000 0.00000000 0.00000000
+	map_Ka mat_Shader2_diffuse.png
+	map_Kd mat_Shader2_diffuse.png
+	map_Ks mat_Shader2_specular.png
+	map_bump mat_Shader2_bump.png
+	bump mat_Shader2_bump.png
